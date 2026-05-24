@@ -1,0 +1,379 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Highly Available Auto Scaling Web Application
+  using ALB, ASG, NAT Gateway, and Private EC2 Instances
+
+# =========================================================
+# PARAMETERS
+# =========================================================
+Parameters:
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+# =========================================================
+# NETWORKING
+# =========================================================
+Resources:
+
+  # -------------------------------------------------------
+  # VPC
+  # -------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: autoscaling-vpc
+
+  # -------------------------------------------------------
+  # INTERNET GATEWAY
+  # -------------------------------------------------------
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # -------------------------------------------------------
+  # PUBLIC SUBNETS
+  # -------------------------------------------------------
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-subnet-a
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-subnet-b
+
+  # -------------------------------------------------------
+  # PRIVATE SUBNETS
+  # -------------------------------------------------------
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.11.0/24
+      Tags:
+        - Key: Name
+          Value: private-subnet-a
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.12.0/24
+      Tags:
+        - Key: Name
+          Value: private-subnet-b
+
+  # =========================================================
+  # ROUTE TABLES
+  # =========================================================
+
+  # -------------------------------------------------------
+  # PUBLIC ROUTE TABLE
+  # -------------------------------------------------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicInternetRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachInternetGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetA
+
+  PublicSubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetB
+
+  # -------------------------------------------------------
+  # PRIVATE ROUTE TABLE
+  # -------------------------------------------------------
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateSubnetARouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnetA
+
+  PrivateSubnetBRouteAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnetB
+
+  # =========================================================
+  # NAT GATEWAY
+  # =========================================================
+
+  NatElasticIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachInternetGateway
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+
+  PrivateInternetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  # =========================================================
+  # SECURITY GROUPS
+  # =========================================================
+
+  # -------------------------------------------------------
+  # ALB SECURITY GROUP
+  # -------------------------------------------------------
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from Internet
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # -------------------------------------------------------
+  # EC2 SECURITY GROUP
+  # -------------------------------------------------------
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP only from ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  # =========================================================
+  # IAM ROLE FOR SSM
+  # =========================================================
+
+  EC2SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: autoscaling-ssm-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2SSMRole
+
+  # =========================================================
+  # APPLICATION LOAD BALANCER
+  # =========================================================
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: autoscaling-alb
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+
+  # -------------------------------------------------------
+  # TARGET GROUP
+  # -------------------------------------------------------
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: autoscaling-target-group
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckPath: /
+      Matcher:
+        HttpCode: 200
+
+  # -------------------------------------------------------
+  # LISTENER
+  # -------------------------------------------------------
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # =========================================================
+  # LAUNCH TEMPLATE
+  # =========================================================
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: autoscaling-launch-template
+
+      LaunchTemplateData:
+
+        ImageId: !Ref LatestAmiId
+
+        InstanceType: t2.micro
+
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+
+        MetadataOptions:
+          HttpTokens: optional
+
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+
+            yum update -y
+            yum install -y httpd stress
+
+            systemctl enable httpd
+            systemctl start httpd
+
+            INSTANCE_ID=$(curl http://169.254.169.254/latest/meta-data/instance-id)
+
+            cat <<EOF > /var/www/html/index.html
+            <html>
+            <head>
+              <title>Auto Scaling Demo</title>
+            </head>
+            <body>
+              <h1>Auto Scaling Demo</h1>
+              <h2>Served From Instance:</h2>
+              <p>${INSTANCE_ID}</p>
+            </body>
+            </html>
+            EOF
+
+  # =========================================================
+  # AUTO SCALING GROUP
+  # =========================================================
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+
+      MinSize: '1'
+      DesiredCapacity: '1'
+      MaxSize: '4'
+
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+
+      TargetGroupARNs:
+        - !Ref TargetGroup
+
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 120
+
+      Tags:
+        - Key: Name
+          Value: autoscaling-web-instance
+          PropagateAtLaunch: true
+
+  # =========================================================
+  # SCALING POLICY
+  # =========================================================
+
+  CPUScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+
+        TargetValue: 30.0
+
+# =========================================================
+# OUTPUTS
+# =========================================================
+
+Outputs:
+
+  ALBDNSName:
+    Description: DNS Name of Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC

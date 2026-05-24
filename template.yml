@@ -1,7 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Highly Available Auto Scaling Web Application
-  using ALB, ASG, NAT Gateway, and Private EC2 Instances
+  using ALB, ASG, Regional NAT Gateway, and Private EC2 Instances
 
 # =========================================================
 # PARAMETERS
@@ -154,6 +154,8 @@ Resources:
 
   RegionalNatGateway:
     Type: AWS::EC2::NatGateway
+    DependsOn:
+      - AttachInternetGateway
     Properties:
       ConnectivityType: public
       AvailabilityMode: regional
@@ -166,6 +168,8 @@ Resources:
 
   PrivateInternetRoute:
     Type: AWS::EC2::Route
+    DependsOn:
+      - RegionalNatGateway
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
@@ -236,12 +240,19 @@ Resources:
 
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+
+    DependsOn:
+      - AttachInternetGateway
+      - PublicInternetRoute
+
     Properties:
       Name: autoscaling-alb
       Scheme: internet-facing
       Type: application
+
       SecurityGroups:
         - !Ref ALBSecurityGroup
+
       Subnets:
         - !Ref PublicSubnetA
         - !Ref PublicSubnetB
@@ -296,7 +307,7 @@ Resources:
           Arn: !GetAtt EC2InstanceProfile.Arn
 
         MetadataOptions:
-          HttpTokens: optional
+          HttpTokens: required
 
         UserData:
           Fn::Base64: |
@@ -317,12 +328,12 @@ Resources:
             cat <<EOF > /var/www/html/index.html
             <html>
             <head>
-            <title>Auto Scaling Demo</title>
+              <title>Auto Scaling Demo</title>
             </head>
             <body>
-            <h1>Auto Scaling Demo</h1>
-            <h2>Served From Instance:</h2>
-            <p>${INSTANCE_ID}</p>
+              <h1>Auto Scaling Demo</h1>
+              <h2>Served From Instance:</h2>
+              <p>${INSTANCE_ID}</p>
             </body>
             </html>
             EOF
@@ -333,6 +344,10 @@ Resources:
 
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
+
+    DependsOn:
+      - ALBListener
+
     Properties:
 
       MinSize: '1'
